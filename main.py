@@ -18,6 +18,17 @@ os.makedirs(DATA_DIR, exist_ok=True)
 MAX_CITIES = 10
 COUNTRY_FILE = "countries.txt"
 
+# 中文→英文国家名映射
+COUNTRY_NAME_EN = {
+    "中国": "China",
+    "美国": "United States",
+    "埃及": "Egypt",
+    "尼日利亚": "Nigeria",
+    "法国": "France",
+    "日本": "Japan",
+    "澳大利亚": "Australia",
+}
+
 # 国家信息: 语言, 时区, 洲
 COUNTRY_INFO = {
     "中国": ("汉语", "UTC+8", "亚洲"),
@@ -27,7 +38,6 @@ COUNTRY_INFO = {
     "法国": ("法语", "UTC+1", "欧洲"),
     "日本": ("日语", "UTC+9", "亚洲"),
     "澳大利亚": ("英语", "UTC+8 至 UTC+10", "大洋洲"),
-    # 可自行补全其他国家
 }
 
 # ---------- 读取国家列表 ----------
@@ -43,7 +53,8 @@ def read_countries():
 
 # ---------- 抓取城市和人口 ----------
 def fetch_country_cities(country_name):
-    """从多个互联网网站抓取前10城市及人口"""
+    """从 Wikipedia 和其他网站抓取前10城市及人口"""
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
     city_pop_list = []
 
     # ---------------- 中文 Wikipedia ----------------
@@ -53,18 +64,27 @@ def fetch_country_cities(country_name):
     ]
     for url in urls_zh:
         try:
-            resp = requests.get(url, timeout=15)
+            resp = requests.get(url, timeout=15, headers=headers)
             resp.encoding = "utf-8"
             soup = BeautifulSoup(resp.text, "html.parser")
             tables = soup.find_all("table", {"class": ["wikitable", "wikitable sortable"]})
             for table in tables:
                 rows = table.find_all("tr")[1:]
+                # 找人口列索引
+                header = [th.get_text(strip=True) for th in table.find_all("th")]
+                pop_col_idx = -1
+                for i, h in enumerate(header):
+                    if "人口" in h:
+                        pop_col_idx = i
+                        break
+                if pop_col_idx == -1:
+                    pop_col_idx = 1  # 默认第二列
                 for row in rows:
                     cols = row.find_all(["td", "th"])
-                    if len(cols) < 2:
+                    if len(cols) <= pop_col_idx:
                         continue
                     city = cols[0].get_text(strip=True)
-                    pop_text = cols[1].get_text(strip=True).replace(",", "").split()[0]
+                    pop_text = cols[pop_col_idx].get_text(strip=True).replace(",", "").split()[0]
                     try:
                         pop = int(pop_text)
                     except:
@@ -74,26 +94,33 @@ def fetch_country_cities(country_name):
                         break
                 if city_pop_list:
                     return city_pop_list
-        except:
+        except Exception as e:
+            logging.warning(f"中文 Wikipedia 抓取失败 {country_name}: {e}")
             continue
 
     # ---------------- 英文 Wikipedia ----------------
-    url_en = f"https://en.wikipedia.org/wiki/List_of_cities_in_{country_name.replace(' ', '_')}"
+    country_en = COUNTRY_NAME_EN.get(country_name, country_name)
+    url_en = f"https://en.wikipedia.org/wiki/List_of_cities_in_{country_en.replace(' ', '_')}"
     try:
-        resp = requests.get(url_en, timeout=15)
+        resp = requests.get(url_en, timeout=15, headers=headers)
         soup = BeautifulSoup(resp.text, "html.parser")
         tables = soup.find_all("table", {"class": ["wikitable", "wikitable sortable"]})
         for table in tables:
             headers = [th.get_text(strip=True).lower() for th in table.find_all("th")]
-            if not any("population" in h for h in headers):
+            pop_col_idx = -1
+            for i, h in enumerate(headers):
+                if "population" in h:
+                    pop_col_idx = i
+                    break
+            if pop_col_idx == -1:
                 continue
             rows = table.find_all("tr")[1:]
             for row in rows:
                 cols = row.find_all("td")
-                if len(cols) < 2:
+                if len(cols) <= pop_col_idx:
                     continue
                 city = cols[0].get_text(strip=True)
-                pop_text = cols[1].get_text(strip=True).replace(",", "").split()[0]
+                pop_text = cols[pop_col_idx].get_text(strip=True).replace(",", "").split()[0]
                 try:
                     pop = int(pop_text)
                 except:
@@ -103,36 +130,11 @@ def fetch_country_cities(country_name):
                     break
             if city_pop_list:
                 return city_pop_list
-    except:
-        pass
+    except Exception as e:
+        logging.warning(f"英文 Wikipedia 抓取失败 {country_name}: {e}")
 
-    # ---------------- 其他网站可选 ----------------
-    try:
-        url_wp = f"https://worldpopulationreview.com/countries/{country_name.replace(' ', '-')}-population"
-        resp = requests.get(url_wp, timeout=15)
-        soup = BeautifulSoup(resp.text, "html.parser")
-        table = soup.find("table")
-        if table:
-            rows = table.find_all("tr")[1:]
-            for row in rows:
-                cols = row.find_all("td")
-                if len(cols) < 2:
-                    continue
-                city = cols[0].get_text(strip=True)
-                pop_text = cols[1].get_text(strip=True).replace(",", "")
-                try:
-                    pop = int(pop_text)
-                except:
-                    continue
-                city_pop_list.append((city, pop))
-                if len(city_pop_list) >= MAX_CITIES:
-                    break
-            if city_pop_list:
-                return city_pop_list
-    except:
-        pass
-
-    # 抓取失败返回默认
+    # ---------------- 都失败返回默认 ----------------
+    logging.warning(f"⚠️ {country_name} 城市数据未找到")
     return [("未找到数据", 0)]
 
 # ---------- 写入 Excel 并美化 ----------
@@ -174,7 +176,6 @@ def write_excel(data, file_path):
     wb.save(file_path)
 
 # ---------- API ----------
-
 @app.get("/generate_excel")
 def generate_excel():
     rows = []
