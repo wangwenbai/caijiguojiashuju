@@ -6,17 +6,20 @@ import pandas as pd
 import os
 import time
 from openpyxl import load_workbook
-from openpyxl.utils import get_column_letter
 from openpyxl.styles import Alignment
+import logging
+
+# ---------- 配置 ----------
+logging.basicConfig(level=logging.INFO)
 
 app = FastAPI()
 DATA_DIR = "data"
 os.makedirs(DATA_DIR, exist_ok=True)
-MAX_CITIES = 10  # 每个国家抓取前10城市
+MAX_CITIES = 10
 COUNTRY_FILE = "countries.txt"
 
-# 国家信息字典: 语言, 时区, 洲
-# 这里只列示部分示例，你可以补全所有国家
+# 国家信息: 语言, 时区, 洲
+# 示例，可自行补全所有国家
 COUNTRY_INFO = {
     "中国": ("汉语", "UTC+8", "亚洲"),
     "美国": ("英语", "UTC-5 至 UTC-10", "北美洲"),
@@ -25,9 +28,10 @@ COUNTRY_INFO = {
     "法国": ("法语", "UTC+1", "欧洲"),
     "日本": ("日语", "UTC+9", "亚洲"),
     "澳大利亚": ("英语", "UTC+8 至 UTC+10", "大洋洲"),
+    # 可继续补全其他国家
 }
 
-# 读取国家列表
+# ---------- 读取国家列表 ----------
 def read_countries():
     countries = []
     if os.path.exists(COUNTRY_FILE):
@@ -38,7 +42,7 @@ def read_countries():
                     countries.append(country)
     return countries
 
-# 抓取城市和人口
+# ---------- 抓取城市和人口 ----------
 def fetch_country_cities(cn_name):
     urls = [
         f"https://zh.wikipedia.org/wiki/{cn_name}城市列表",
@@ -67,16 +71,15 @@ def fetch_country_cities(cn_name):
             if results:
                 return results
         except Exception as e:
-            print(f"{cn_name}抓取失败: {e}")
+            logging.warning(f"{cn_name}抓取失败: {e}")
             continue
     return [("未找到数据", 0)]
 
-# Excel 写入并合并国家单元格
+# ---------- 写入 Excel 并合并单元格 ----------
 def write_excel(data, file_path):
     df = pd.DataFrame(data, columns=["城市", "人口", "国家", "语言", "时区", "洲"])
     df.to_excel(file_path, index=False)
 
-    # 合并国家列单元格
     wb = load_workbook(file_path)
     ws = wb.active
     current_row = 2
@@ -87,28 +90,39 @@ def write_excel(data, file_path):
             current_row += 1
         end_row = current_row - 1
         if end_row > start_row:
-            ws.merge_cells(start_row=start_row, start_column=3, end_row=end_row, end_column=3)
-            ws.merge_cells(start_row=start_row, start_column=4, end_row=end_row, end_column=4)
-            ws.merge_cells(start_row=start_row, start_column=5, end_row=end_row, end_column=5)
-            ws.merge_cells(start_row=start_row, start_column=6, end_row=end_row, end_column=6)
-            for col in range(3, 7):
+            for col in range(3, 7):  # 国家、语言、时区、洲列
+                ws.merge_cells(start_row=start_row, start_column=col, end_row=end_row, end_column=col)
                 ws.cell(start_row, col).alignment = Alignment(vertical="center", horizontal="center")
     wb.save(file_path)
 
+# ---------- API ----------
 @app.get("/generate_excel")
 def generate_excel():
     rows = []
     countries = read_countries()
+    if not countries:
+        logging.warning("⚠️ countries.txt为空或未找到文件")
+        return {"error": "countries.txt为空或未找到文件"}
+
     for cn_name in countries:
         cities = fetch_country_cities(cn_name)
         lang, tz, continent = COUNTRY_INFO.get(cn_name, ("未知", "未知", "未知"))
         for city, pop in cities:
             rows.append([city, pop, cn_name, lang, tz, continent])
         time.sleep(1)
+
     file_path = os.path.join(DATA_DIR, "country_population.xlsx")
     write_excel(rows, file_path)
+
+    logging.info(f"✅ Excel 文件生成成功，可下载: {file_path}")
+
     return FileResponse(
         file_path,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         filename="country_population.xlsx"
     )
+
+# ---------- 根路径提示 ----------
+@app.get("/")
+def root():
+    return {"message": "API 正常运行，请访问 /generate_excel 下载 Excel 文件"}
