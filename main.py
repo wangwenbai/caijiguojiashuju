@@ -5,45 +5,44 @@ from bs4 import BeautifulSoup
 import pandas as pd
 import os
 import time
+from openpyxl import load_workbook
+from openpyxl.utils import get_column_letter
+from openpyxl.styles import Alignment
 
 app = FastAPI()
 DATA_DIR = "data"
 os.makedirs(DATA_DIR, exist_ok=True)
 MAX_CITIES = 10  # 每个国家抓取前10城市
+COUNTRY_FILE = "countries.txt"
 
-COUNTRY_FILE = "countries.txt"  # 根目录下的文件
-
-# ---------- 国家信息字典 (语言, 时区, 洲) ----------
-# 可根据需要扩展
+# 国家信息字典: 语言, 时区, 洲
+# 这里只列示部分示例，你可以补全所有国家
 COUNTRY_INFO = {
     "中国": ("汉语", "UTC+8", "亚洲"),
-    "美国": ("英语", "UTC-5", "北美洲"),
+    "美国": ("英语", "UTC-5 至 UTC-10", "北美洲"),
     "埃及": ("阿拉伯语", "UTC+2", "非洲"),
     "尼日利亚": ("英语", "UTC+1", "非洲"),
-    # 这里可以继续填入所有国家主要语言、时区和洲
+    "法国": ("法语", "UTC+1", "欧洲"),
+    "日本": ("日语", "UTC+9", "亚洲"),
+    "澳大利亚": ("英语", "UTC+8 至 UTC+10", "大洋洲"),
 }
 
-# ---------- 读取国家列表 ----------
+# 读取国家列表
 def read_countries():
     countries = []
     if os.path.exists(COUNTRY_FILE):
         with open(COUNTRY_FILE, "r", encoding="utf-8") as f:
             for line in f:
-                line = line.strip()
-                if line:
-                    parts = line.split("\t")  # 双列分隔
-                    if len(parts) == 2:
-                        cn_name, en_name = parts
-                    else:
-                        cn_name = en_name = parts[0]
-                    countries.append((cn_name, en_name))
+                country = line.strip()
+                if country:
+                    countries.append(country)
     return countries
 
-# ---------- 抓取城市函数 ----------
-def fetch_country_cities(cn_name, en_name):
+# 抓取城市和人口
+def fetch_country_cities(cn_name):
     urls = [
-        f"https://zh.wikipedia.org/wiki/{cn_name}城市列表",  # 中文 Wikipedia
-        f"https://en.wikipedia.org/wiki/List_of_cities_in_{en_name.replace(' ', '_')}"  # 英文 Wikipedia
+        f"https://zh.wikipedia.org/wiki/{cn_name}城市列表",
+        f"https://en.wikipedia.org/wiki/List_of_cities_in_{cn_name.replace(' ', '_')}"
     ]
     for url in urls:
         try:
@@ -56,7 +55,7 @@ def fetch_country_cities(cn_name, en_name):
             rows = table.find_all("tr")[1:MAX_CITIES+1]
             results = []
             for row in rows:
-                cols = row.find_all(["td","th"])
+                cols = row.find_all(["td", "th"])
                 if len(cols) >= 2:
                     city = cols[0].get_text(strip=True)
                     pop = cols[1].get_text(strip=True).replace(",", "")
@@ -72,23 +71,42 @@ def fetch_country_cities(cn_name, en_name):
             continue
     return [("未找到数据", 0)]
 
-# ---------- API ----------
+# Excel 写入并合并国家单元格
+def write_excel(data, file_path):
+    df = pd.DataFrame(data, columns=["城市", "人口", "国家", "语言", "时区", "洲"])
+    df.to_excel(file_path, index=False)
+
+    # 合并国家列单元格
+    wb = load_workbook(file_path)
+    ws = wb.active
+    current_row = 2
+    while current_row <= ws.max_row:
+        country = ws.cell(current_row, 3).value
+        start_row = current_row
+        while current_row <= ws.max_row and ws.cell(current_row, 3).value == country:
+            current_row += 1
+        end_row = current_row - 1
+        if end_row > start_row:
+            ws.merge_cells(start_row=start_row, start_column=3, end_row=end_row, end_column=3)
+            ws.merge_cells(start_row=start_row, start_column=4, end_row=end_row, end_column=4)
+            ws.merge_cells(start_row=start_row, start_column=5, end_row=end_row, end_column=5)
+            ws.merge_cells(start_row=start_row, start_column=6, end_row=end_row, end_column=6)
+            for col in range(3, 7):
+                ws.cell(start_row, col).alignment = Alignment(vertical="center", horizontal="center")
+    wb.save(file_path)
+
 @app.get("/generate_excel")
 def generate_excel():
     rows = []
     countries = read_countries()
-    for cn_name, en_name in countries:
-        cities = fetch_country_cities(cn_name, en_name)
+    for cn_name in countries:
+        cities = fetch_country_cities(cn_name)
         lang, tz, continent = COUNTRY_INFO.get(cn_name, ("未知", "未知", "未知"))
         for city, pop in cities:
-            rows.append([city, pop, cn_name, en_name, lang, tz, continent])
-        time.sleep(1)  # 防止请求过快
-    df = pd.DataFrame(
-        rows,
-        columns=["城市", "人口", "国家中文名", "国家英文名", "主要语言", "时区", "洲"]
-    )
+            rows.append([city, pop, cn_name, lang, tz, continent])
+        time.sleep(1)
     file_path = os.path.join(DATA_DIR, "country_population.xlsx")
-    df.to_excel(file_path, index=False)
+    write_excel(rows, file_path)
     return FileResponse(
         file_path,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
